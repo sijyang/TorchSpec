@@ -239,6 +239,16 @@ def _validate_vllm_config(config: DictConfig) -> None:
             raise NotImplementedError(f"{label} is not yet supported with the vllm backend!")
 
 
+def _validate_atom_config(config: DictConfig) -> None:
+    """Raise if the atom backend is selected with unsupported feature flags."""
+    if config.model.target_model_backend != "atom":
+        return
+    if OmegaConf.select(config, "training.train_with_decode"):
+        raise NotImplementedError(
+            "train_with_decode is not supported with the ATOM backend"
+        )
+
+
 def _save_config_snapshot(config: DictConfig) -> None:
     """Save the resolved config to output_dir/config.yaml if output_dir is set."""
     output_dir = OmegaConf.select(config, "output_dir", default=None)
@@ -283,6 +293,7 @@ def load_config(
     _resolve_relative_paths(config, os.getcwd())
 
     _validate_vllm_config(config)
+    _validate_atom_config(config)
 
     if save_snapshot:
         _save_config_snapshot(config)
@@ -292,6 +303,7 @@ def load_config(
 
 # Sub-sections whose fields receive a name prefix when flattened.
 _PREFIXED_SECTIONS = {
+    "atom": "atom_",
     "decode": "decode_",
     "mooncake": "mooncake_",
     "sglang": "sglang_",
@@ -342,7 +354,7 @@ def config_to_flat_args(config: DictConfig) -> argparse.Namespace:
         logger.warning("continual_training=True but no training.load_path was provided")
 
     if "last_hidden_states_prenorm" not in flat or flat["last_hidden_states_prenorm"] is None:
-        flat["last_hidden_states_prenorm"] = flat.get("inference_engine_type") == "vllm"
+        flat["last_hidden_states_prenorm"] = flat.get("inference_engine_type") in ("vllm", "atom")
 
     return argparse.Namespace(**flat)
 

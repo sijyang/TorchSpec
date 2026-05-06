@@ -106,6 +106,24 @@ class VllmConfig:
 
 
 @dataclass
+class AtomConfig:
+    """Essential ATOM engine configuration.
+
+    Only fields that TorchSpec explicitly uses are listed here.
+    Any additional ATOM engine kwargs can be supplied via ``extra_args``
+    and will be forwarded as-is.
+
+    ATOM is prefill-only for TorchSpec (hidden states extraction),
+    so CUDA graphs are disabled by default (``enforce_eager=True``).
+    """
+
+    tp_size: int = 8
+    enforce_eager: bool = True
+    trust_remote_code: bool = False
+    extra_args: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class InferenceConfig:
     aux_hidden_states_layers: Optional[list] = None
     inference_batch_size: int = 1
@@ -120,6 +138,7 @@ class InferenceConfig:
     last_hidden_states_prenorm: Optional[bool] = None
     max_sample_pool_size: int = 0
     store_last_hidden_states: bool = True
+    atom: AtomConfig = field(default_factory=AtomConfig)
     sglang: SGLangConfig = field(default_factory=SGLangConfig)
     vllm: VllmConfig = field(default_factory=VllmConfig)
 
@@ -131,7 +150,7 @@ class InferenceConfig:
         """
         if self.last_hidden_states_prenorm is not None:
             return self.last_hidden_states_prenorm
-        return self.inference_engine_type == "vllm"
+        return self.inference_engine_type in ("vllm", "atom")
 
 
 @dataclass

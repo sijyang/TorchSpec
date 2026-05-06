@@ -42,7 +42,7 @@ def create_inference_engines(args, inference_pg, mooncake_config, engine_group: 
     """
     engine_type = getattr(args, "inference_engine_type", "hf")
 
-    if engine_type not in ("hf", "sgl", "vllm"):
+    if engine_type not in ("hf", "sgl", "vllm", "atom"):
         raise ValueError(f"Unknown inference_engine_type: {engine_type}")
 
     logger.info(f"Using {engine_type} engine for inference")
@@ -74,7 +74,7 @@ def prepare_inference_engines(args, inference_pg, mooncake_config, engine_group:
     """
     engine_type = getattr(args, "inference_engine_type", "hf")
 
-    if engine_type not in ("hf", "sgl", "vllm"):
+    if engine_type not in ("hf", "sgl", "vllm", "atom"):
         raise ValueError(f"Unknown inference_engine_type: {engine_type}")
 
     logger.info(f"Preparing {engine_type} inference engines...")
@@ -83,6 +83,8 @@ def prepare_inference_engines(args, inference_pg, mooncake_config, engine_group:
         engines, init_refs = _prepare_hf_engines(args, inference_pg, mooncake_config, engine_group)
     elif engine_type == "sgl":
         engines, init_refs = _prepare_sgl_engines(args, inference_pg, mooncake_config, engine_group)
+    elif engine_type == "atom":
+        engines, init_refs = _prepare_atom_engines(args, inference_pg, mooncake_config, engine_group)
     else:
         engines, init_refs = _prepare_vllm_engines(
             args, inference_pg, mooncake_config, engine_group
@@ -109,6 +111,8 @@ def init_engines(args, pg, engine_type: str, mooncake_config=None, engine_group:
         return _init_sgl_engines(args, pg, mooncake_config, engine_group)
     elif engine_type == "vllm":
         return _init_vllm_engines(args, pg, mooncake_config, engine_group)
+    elif engine_type == "atom":
+        return _init_atom_engines(args, pg, mooncake_config, engine_group)
     else:
         raise ValueError(f"Unknown engine_type: {engine_type}")
 
@@ -427,6 +431,68 @@ def _init_vllm_engines(args, pg, mooncake_config=None, engine_group: int = 0) ->
     init_timeout = getattr(args, "vllm_init_timeout", 300 if nnodes == 1 else 600)
     _wait_for_init(init_handles, "Vllm", timeout=init_timeout)
     return head_engines
+
+
+def _prepare_atom_engines(args, pg, mooncake_config=None, engine_group: int = 0) -> tuple[list, list]:
+    """Create ATOM engine actors and fire init calls without waiting.
+
+    ATOM handles distributed setup internally via its own process manager,
+    so no multi-node TP or port pre-allocation is needed here.
+
+    Returns:
+        Tuple of (engines, init_handles).
+    """
+    num_gpus_total = getattr(args, "inference_num_gpus", 1)
+    num_gpus_per_engine = getattr(args, "inference_num_gpus_per_engine", 1)
+    num_gpus_per_node = getattr(args, "inference_num_gpus_per_node", 8)
+
+    num_gpus_per_engine = min(num_gpus_per_engine, num_gpus_per_node)
+    num_engines = num_gpus_total // num_gpus_per_engine
+
+    logger.info(f"Initializing {num_engines} ATOM engines ({num_gpus_per_engine} GPU(s) each)")
+
+    from torchspec.inference.engine.atom_engine import AtomEngine
+
+    pg_obj, reordered_bundle_indices, reordered_gpu_ids = pg
+    env_vars = get_torchspec_env_vars()
+
+    AtomRayActor = ray.remote(AtomEngine)
+
+    engines = []
+    init_handles = []
+    for i in range(num_engines):
+        bundle_offset = i * num_gpus_per_engine
+        base_gpu_id = int(reordered_gpu_ids[bundle_offset])
+
+        scheduling_strategy = PlacementGroupSchedulingStrategy(
+            placement_group=pg_obj,
+            placement_group_capture_child_tasks=True,
+            placement_group_bundle_index=reordered_bundle_indices[bundle_offset],
+        )
+
+        engine = AtomRayActor.options(
+            num_cpus=0.2,
+            num_gpus=0.2,
+            scheduling_strategy=scheduling_strategy,
+            runtime_env={"env_vars": env_vars},
+        ).remote(
+            args=args,
+            rank=i,
+            base_gpu_id=base_gpu_id,
+            num_gpus_per_engine=num_gpus_per_engine,
+            engine_group=engine_group,
+        )
+        engines.append(engine)
+        init_handles.append(engine.init.remote(mooncake_config=mooncake_config))
+
+    return engines, init_handles
+
+
+def _init_atom_engines(args, pg, mooncake_config=None, engine_group: int = 0) -> list:
+    """Initialize ATOM engines with Ray placement groups (blocking)."""
+    engines, init_handles = _prepare_atom_engines(args, pg, mooncake_config, engine_group)
+    _wait_for_init(init_handles, "ATOM", timeout=600)
+    return engines
 
 
 def _create_and_init_actors(
