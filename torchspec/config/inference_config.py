@@ -145,12 +145,12 @@ class InferenceConfig:
     def resolve_last_hidden_states_prenorm(self) -> bool:
         """Whether last_hidden_states from the engine are pre-norm.
 
-        vLLM's extract_hidden_states connector can only capture raw layer
-        outputs (pre-norm), while sglang and hf provide post-norm outputs.
+        vLLM's extract_hidden_states connector captures raw layer outputs
+        (pre-norm), while sglang, hf, and ATOM provide post-norm outputs.
         """
         if self.last_hidden_states_prenorm is not None:
             return self.last_hidden_states_prenorm
-        return self.inference_engine_type in ("vllm", "atom")
+        return self.inference_engine_type == "vllm"
 
 
 @dataclass

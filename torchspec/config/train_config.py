@@ -354,7 +354,7 @@ def config_to_flat_args(config: DictConfig) -> argparse.Namespace:
         logger.warning("continual_training=True but no training.load_path was provided")
 
     if "last_hidden_states_prenorm" not in flat or flat["last_hidden_states_prenorm"] is None:
-        flat["last_hidden_states_prenorm"] = flat.get("inference_engine_type") in ("vllm", "atom")
+        flat["last_hidden_states_prenorm"] = flat.get("inference_engine_type") == "vllm"
 
     return argparse.Namespace(**flat)
 

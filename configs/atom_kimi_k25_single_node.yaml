@@ -1,0 +1,105 @@
+# Kimi-K2.5 Eagle3 training with ATOM inference on one 8-GPU node.
+#
+# Recipe shape:
+#   - Phase 1: one pass over mlabonne/open-perfectblend (1,420,909 samples)
+#   - Phase 2: one pass over lightseekorg/kimi-mtp-dataset, initialized from Phase 1
+#   - Main offline metric: accept_length with topk=1, num_steps=3, num_draft_tokens=4
+#
+# ATOM single-node layout:
+#   - 4 GPUs for ATOM inference (TP=4)
+#   - 4 GPUs for Eagle3 training (FSDP/DP)
+
+model:
+  target_model_path: /data/models/amd/Kimi-K2.5-MXFP4
+  target_model_backend: atom
+  trust_remote_code: true
+  draft_model_config: configs/draft_models/kimi_k25_eagle3.json
+  lm_head_key: language_model.lm_head.weight
+  norm_key: language_model.model.norm.weight
+  embedding_key: language_model.model.embed_tokens.weight
+
+dataset:
+  eval_data_path: ../examples/data/eval_conversations.jsonl
+  chat_template: kimi-k25-vlm
+  prompt_key: conversations
+  last_turn_loss_only: true
+
+training:
+  max_seq_length: 20000
+  seed: 42
+  micro_batch_size: 1
+  num_epochs: 1
+  save_interval: 5000
+  learning_rate: 5e-5
+  warmup_ratio: 0.015
+  max_grad_norm: 1
+  ttt_length: 4
+  draft_accumulation_steps: 9
+  training_num_nodes: 1
+  training_num_gpus_per_node: 4
+  attention_backend: flex_attention
+  max_concurrent_batches: 1
+  gradient_checkpointing: true
+  distributed_timeout_minutes: 30
+  placement_strategy: training_first
+
+inference:
+  inference_engine_type: atom
+  inference_num_gpus: 4
+  inference_num_gpus_per_engine: 4
+  inference_num_gpus_per_node: 4
+  max_sample_pool_size: 256
+  inference_buffer_threshold: 64
+  inference_fetch_batch: 64
+  inference_batch_size: 8
+  last_hidden_states_prenorm: false
+  atom:
+    tp_size: 4
+    enforce_eager: true
+    trust_remote_code: true
+    extra_args:
+      kv_cache_dtype: fp8
+      max_num_batched_tokens: 20000
+      # One extra 16-token KV block avoids the 20k full-block decode boundary.
+      max_model_len: 20016
+      gpu_memory_utilization: 0.9
+      level: 0
+
+decode:
+  max_new_tokens: 512
+  temperature: 1.0
+  speculative_algorithm: EAGLE3
+  speculative_draft_model_path: null
+  speculative_num_steps: 3
+  speculative_eagle_topk: 1
+  speculative_num_draft_tokens: 4
+  weight_sync_enabled: false
+  weight_sync_interval: 500
+
+mooncake:
+  master_server_address: null
+  metadata_server: null
+  hidden_dim: 7168
+  global_segment_size: 64GB
+  local_buffer_size: 8GB
+  protocol: tcp
+  enable_gpu_direct: false
+  device_name: ""
+
+output_dir: ./outputs/kimi25_atom_single_node
+cache_dir: ./cache/kimi25_atom_single_node
+model_download_dir: null
+
+debug:
+  save_debug_train_data: null
+  debug_train_only: false
+  debug_inference_only: false
+
+logging:
+  report_to: none
+  wandb_key: null
+  wandb_project: train_kimi25_atom
+  wandb_team: null
+  wandb_group: null
+  wandb_mode: online
+  wandb_random_suffix: true
