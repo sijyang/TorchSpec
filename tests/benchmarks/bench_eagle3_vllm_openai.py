@@ -3,7 +3,7 @@
 
 Example:
     python3 bench_eagle3_vllm_openai.py \
-        --model-path /data/models/amd/Kimi-K2.5-MXFP4 \
+        --model-path <model-name-or-path> \
         --port 30000 \
         --benchmark-list mtbench:80 gsm8k:200 humaneval:200 math500:200 ceval:200 aime mmlu simpleqa financeqa livecodebench mmstar \
         --name kimi25_phase1_vllm_eagle3
@@ -34,6 +34,20 @@ from datasets import concatenate_datasets, load_dataset
 INVALID = -9999999
 TORCHSPEC_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = TORCHSPEC_ROOT / "outputs" / "benchmarks"
+DEFAULT_PROGRESS_INTERVAL = 10
+SPEEDBENCH_QUALITATIVE_CATEGORIES = [
+    "coding",
+    "math",
+    "humanities",
+    "stem",
+    "writing",
+    "summarization",
+    "roleplay",
+    "rag",
+    "multilingual",
+    "reasoning",
+    "qa",
+]
 
 
 @dataclass
@@ -588,6 +602,45 @@ def load_mtbench(num_samples: int | None, subset: list[str] | None = None) -> di
     return {"samples": samples, "extract": lambda output: output, "max_tokens": 2048, "stop": None, "endpoint": "mtbench"}
 
 
+def load_speedbench_qualitative(
+    num_samples: int | None, subset: list[str] | None = None
+) -> dict[str, Any]:
+    categories = subset or SPEEDBENCH_QUALITATIVE_CATEGORIES
+    unknown_categories = sorted(set(categories) - set(SPEEDBENCH_QUALITATIVE_CATEGORIES))
+    if unknown_categories:
+        raise ValueError(
+            "Unsupported SPEED-Bench qualitative categories "
+            f"{unknown_categories}. Available: {', '.join(SPEEDBENCH_QUALITATIVE_CATEGORIES)}"
+        )
+
+    dataset = load_dataset("nvidia/SPEED-Bench", "qualitative", split="test")
+    samples = []
+    for category in categories:
+        count = 0
+        for row in dataset:
+            if row["category"] != category:
+                continue
+            if num_samples is not None and count >= num_samples:
+                break
+            samples.append(
+                {
+                    "turns": row["turns"],
+                    "label": None,
+                    "category": row["category"],
+                    "source": row["source"],
+                    "question_id": row["question_id"],
+                }
+            )
+            count += 1
+    return {
+        "samples": samples,
+        "extract": lambda output: output,
+        "max_tokens": 2048,
+        "stop": None,
+        "endpoint": "turns",
+    }
+
+
 def image_to_data_url(path: str) -> str:
     with open(path, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("ascii")
@@ -626,6 +679,7 @@ LOADERS = {
     "livecodebench": load_livecodebench,
     "simpleqa": load_simpleqa,
     "mtbench": load_mtbench,
+    "speedbench_qualitative": load_speedbench_qualitative,
     "mmstar": load_mmstar,
 }
 
@@ -659,7 +713,7 @@ def is_correct(benchmark: str, prediction: Any, label: Any) -> bool:
             return False
     if benchmark == "mmstar":
         return str(prediction).strip().upper() == str(label).strip().upper()
-    if benchmark in ("financeqa", "livecodebench", "simpleqa", "mtbench"):
+    if benchmark in ("financeqa", "livecodebench", "simpleqa", "mtbench", "speedbench_qualitative"):
         return False
     if benchmark == "humaneval":
         pred = str(prediction).strip()
@@ -747,7 +801,7 @@ def compute_accuracy_like_specforge(
         )
         return correct / len(labels) if labels else None, correct, sum(p is not None for p in predictions)
 
-    if benchmark in ("financeqa", "livecodebench", "simpleqa", "mtbench"):
+    if benchmark in ("financeqa", "livecodebench", "simpleqa", "mtbench", "speedbench_qualitative"):
         return None, 0, sum(p is not None for p in predictions)
 
     raise ValueError(f"Unsupported benchmark: {benchmark}")
@@ -799,6 +853,25 @@ def run_sample(
             stop=stop,
         )
         return {"answer_1": answer_1, "answer_2": answer_2}, tokens_1 + tokens_2
+    if endpoint == "turns":
+        messages = []
+        answers = []
+        total_tokens = 0
+        for turn in sample["turns"]:
+            messages.append({"role": "user", "content": turn})
+            answer, tokens = chat_messages_completion(
+                base_url=base_url,
+                model=args.model_path,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=args.temperature,
+                timeout=args.timeout,
+                stop=stop,
+            )
+            messages.append({"role": "assistant", "content": answer})
+            answers.append(answer)
+            total_tokens += tokens
+        return answers[-1] if len(answers) == 1 else {"answers": answers}, total_tokens
     if endpoint == "image":
         return chat_messages_completion(
             base_url=base_url,
@@ -876,7 +949,7 @@ def run_benchmark(args: argparse.Namespace, benchmark_item: str) -> dict[str, An
         for done_count, future in enumerate(futures.as_completed(pending), 1):
             item = future.result()
             results[item["index"]] = item
-            if done_count % max(1, args.progress_interval) == 0 or done_count == len(samples):
+            if done_count % DEFAULT_PROGRESS_INTERVAL == 0 or done_count == len(samples):
                 correct_so_far = sum(1 for r in results if r and r["correct"])
                 print(f"  {done_count}/{len(samples)} done, correct_so_far={correct_so_far}")
 
@@ -888,14 +961,9 @@ def run_benchmark(args: argparse.Namespace, benchmark_item: str) -> dict[str, An
     }
     final_results = [r for r in results if r is not None]
     failed = sum(1 for r in final_results if not r["ok"])
-    accuracy, correct, valid_predictions = compute_accuracy_like_specforge(
+    accuracy, _, valid_predictions = compute_accuracy_like_specforge(
         name, final_results, samples
     )
-    for result, sample in zip(final_results, samples):
-        result["correct"] = (
-            result["prediction"] is not None
-            and is_correct(name, result["prediction"], sample["label"])
-        )
     total_tokens = sum(int(r["completion_tokens"]) for r in final_results)
     num_drafts = spec_delta.get("num_drafts", 0.0)
     num_draft_tokens = spec_delta.get("num_draft_tokens", 0.0)
@@ -965,7 +1033,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=None)
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--num-threads", type=int, default=1)
-    parser.add_argument("--progress-interval", type=int, default=10)
     return parser.parse_args()
 
 

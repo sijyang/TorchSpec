@@ -7,7 +7,8 @@ The scripts do not import TorchSpec or SpecForge internals. They can be run from
 any working directory as long as their Python dependencies are installed and the
 target server is already running.
 
-By default, benchmark result files are written under `outputs/`.
+The scripts intentionally avoid machine-specific default model paths. Pass model
+and tokenizer paths explicitly when a script needs them.
 
 ## Generic Benchmarks
 
@@ -24,7 +25,7 @@ Example:
 
 ```bash
 python tests/benchmarks/bench_eagle3_vllm_openai.py \
-    --model-path /data/models/amd/Kimi-K2.5-MXFP4 \
+    --model-path <model-name-or-path> \
     --host localhost \
     --port 30000 \
     --benchmark-list mtbench:80 gsm8k:200 humaneval:200 math500:200 ceval:200 aime \
@@ -50,12 +51,66 @@ Default output directory:
 outputs/benchmarks/
 ```
 
+## Kimi K2.5 Eagle3 TPS
+
+Use the TPS wrappers for the SPEED-Bench Table 1 category sweep. They reuse
+`bench_eagle3_vllm_openai.py` for request generation and metric aggregation.
+
+vLLM server already running:
+
+```bash
+python tests/benchmarks/bench_kimi25_eagle3_tps_vllm.py run \
+    --model-path kimi25 \
+    --host localhost \
+    --port 30000 \
+    --concurrency 32 \
+    --name kimi25_vllm_eagle3
+```
+
+ATOM server already running:
+
+```bash
+python tests/benchmarks/bench_kimi25_eagle3_tps_atom.py run \
+    --variant eagle3 \
+    --target-model-path <target-model-path-or-name> \
+    --draft-model-path <draft-model-path> \
+    --host localhost \
+    --server-port 8000 \
+    --concurrency 32
+```
+
+Start ATOM, run the benchmark, and stop the server:
+
+```bash
+python tests/benchmarks/bench_kimi25_eagle3_tps_atom.py run-with-server \
+    --variant eagle3 \
+    --target-model-path <target-model-path> \
+    --draft-model-path <draft-model-path> \
+    --atom-root <atom-repo-root> \
+    --tensor-parallel-size 8 \
+    --concurrency 32
+```
+
+`--atom-root` defaults to the current working directory. For `--variant eagle3`,
+`--draft-model-path` is required. For `--variant baseline`, the draft model is
+not used.
+
+Compare two generated JSON files:
+
+```bash
+python tests/benchmarks/bench_kimi25_eagle3_tps_vllm.py compare \
+    --baseline-json <baseline-results.json> \
+    --eagle3-json <eagle3-results.json>
+```
+
+The ATOM TPS script has the same `compare` subcommand.
+
 ## BFCL Function Calling
 
 Use `bfcl_eval_eagle3_vllm_openai.py` for BFCL function-calling benchmarks
 against a local OpenAI-compatible Kimi EAGLE3 vLLM server. Defaults match
-`http://localhost:30000/v1`, served model `kimi25`, and tokenizer path
-`/data/models/amd/Kimi-K2.5-MXFP4`.
+`http://localhost:30000/v1` and served model `kimi25`. The tokenizer path is
+required.
 
 Install:
 
@@ -67,16 +122,12 @@ Run against the already-started local server:
 
 ```bash
 python tests/benchmarks/bfcl_eval_eagle3_vllm_openai.py \
+    --tokenizer-path <tokenizer-path> \
     --num-threads 8
 ```
 
 The script also collects EAGLE3 speculative decoding metrics from the vLLM
 `/metrics` endpoint and writes a ready-to-paste summary table:
-
-```bash
-python tests/benchmarks/bfcl_eval_eagle3_vllm_openai.py \
-    --num-threads 8
-```
 
 It runs categories one by one, snapshots the same vLLM spec counters used by
 `bench_eagle3_vllm_openai.py` before and after each category, computes
@@ -104,6 +155,7 @@ Run one category:
 
 ```bash
 python tests/benchmarks/bfcl_eval_eagle3_vllm_openai.py \
+    --tokenizer-path <tokenizer-path> \
     --category live_simple
 ```
 
@@ -113,7 +165,7 @@ You can also override local server settings:
 python tests/benchmarks/bfcl_eval_eagle3_vllm_openai.py \
     --base-url http://localhost:30000/v1 \
     --served-model-name kimi25 \
-    --tokenizer-path /data/models/amd/Kimi-K2.5-MXFP4 \
+    --tokenizer-path <tokenizer-path> \
     --num-threads 8
 ```
 

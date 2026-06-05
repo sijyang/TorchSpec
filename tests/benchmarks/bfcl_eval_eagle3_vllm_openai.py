@@ -12,8 +12,8 @@ import argparse
 import csv
 import json
 import os
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import requests
 
@@ -23,7 +23,6 @@ DEFAULT_PROJECT_ROOT = TORCHSPEC_ROOT / "outputs" / "benchmarks"
 DEFAULT_BASE_URL = "http://localhost:30000/v1"
 DEFAULT_BFCL_MODEL_NAME = "kimi25-local-FC"
 DEFAULT_SERVED_MODEL_NAME = "kimi25"
-DEFAULT_TOKENIZER_PATH = "/data/models/amd/Kimi-K2.5-MXFP4"
 DEFAULT_API_KEY = "EMPTY"
 
 DEFAULT_CATEGORIES = [
@@ -55,37 +54,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--served-model-name", default=DEFAULT_SERVED_MODEL_NAME)
     parser.add_argument("--bfcl-model-name", default=DEFAULT_BFCL_MODEL_NAME)
-    parser.add_argument("--tokenizer-path", default=DEFAULT_TOKENIZER_PATH)
+    parser.add_argument("--tokenizer-path", required=True)
     parser.add_argument("--output-dir", default=str(DEFAULT_PROJECT_ROOT))
     parser.add_argument("--api-key", default=DEFAULT_API_KEY)
     parser.add_argument("--category", default=None, help="Run one BFCL category. Defaults to all configured categories.")
-    parser.add_argument(
-        "--action",
-        choices=["generate", "evaluate", "both"],
-        default="both",
-        help="Run generation, evaluation, or both.",
-    )
     parser.add_argument("--num-threads", type=int, default=1)
-    parser.add_argument(
-        "--spec-metrics-url",
-        default=None,
-        help="vLLM Prometheus metrics base URL. Defaults to the serving endpoint without /v1.",
-    )
-    parser.add_argument(
-        "--summary-output",
-        default=None,
-        help="Optional BFCL summary CSV path. Defaults to <output-dir>/bfcl_eagle3_summary.csv.",
-    )
-    parser.add_argument(
-        "--partial-eval",
-        action="store_true",
-        help="Pass --partial-eval to bfcl evaluate.",
-    )
-    parser.add_argument(
-        "--include-input-log",
-        action="store_true",
-        help="Pass --include-input-log to bfcl generate.",
-    )
     return parser.parse_args()
 
 
@@ -301,7 +274,7 @@ def run_generate(args: argparse.Namespace, categories: list[str]) -> None:
             model=[args.bfcl_model_name],
             test_category=categories,
             temperature=0.001,
-            include_input_log=args.include_input_log,
+            include_input_log=False,
             exclude_state_log=False,
             num_threads=args.num_threads,
             num_gpus=1,
@@ -327,7 +300,7 @@ def run_evaluate(args: argparse.Namespace, categories: list[str]) -> None:
         test_categories=categories,
         result_dir=None,
         score_dir=None,
-        partial_eval=args.partial_eval,
+        partial_eval=False,
     )
 
 
@@ -359,14 +332,8 @@ def main() -> None:
     categories = selected_categories(args.category)
     categories_csv = ",".join(categories)
     env_path = write_env_file(project_root, base_url, args.api_key, args.tokenizer_path)
-    summary_path = (
-        Path(args.summary_output).expanduser().resolve()
-        if args.summary_output
-        else project_root / "bfcl_eagle3_summary.csv"
-    )
-    metrics_base_url = normalize_metrics_base_url(
-        args.spec_metrics_url or default_metrics_base_url(base_url)
-    )
+    summary_path = project_root / "bfcl_eagle3_summary.csv"
+    metrics_base_url = normalize_metrics_base_url(default_metrics_base_url(base_url))
 
     os.environ["BFCL_PROJECT_ROOT"] = str(project_root)
     os.environ["REMOTE_OPENAI_BASE_URL"] = base_url
@@ -385,30 +352,22 @@ def main() -> None:
     print(f"Spec metrics URL: {metrics_base_url}/metrics")
     print(f"BFCL summary output: {summary_path}")
 
-    if args.action in ("evaluate", "both"):
-        if args.action == "evaluate":
-            run_evaluate(args, categories)
-        else:
-            summary_rows = []
-            for category in categories:
-                print(f"Running BFCL category: {category}")
-                spec_before = fetch_spec_metrics(metrics_base_url)
-                run_generate(args, [category])
-                run_evaluate(args, [category])
-                spec_after = fetch_spec_metrics(metrics_base_url)
-                _, _, total_completion_tokens = read_result_metrics(
-                    result_file(project_root, args.bfcl_model_name, category)
-                )
-                spec_metrics = compute_spec_metrics(spec_before, spec_after, total_completion_tokens)
-                summary_rows.append(
-                    collect_category_summary(project_root, args.bfcl_model_name, category, spec_metrics)
-                )
-            write_summary(summary_path, summary_rows)
-            print_markdown_summary(summary_rows)
-            return
-
-    if args.action == "generate":
-        run_generate(args, categories)
+    summary_rows = []
+    for category in categories:
+        print(f"Running BFCL category: {category}")
+        spec_before = fetch_spec_metrics(metrics_base_url)
+        run_generate(args, [category])
+        run_evaluate(args, [category])
+        spec_after = fetch_spec_metrics(metrics_base_url)
+        _, _, total_completion_tokens = read_result_metrics(
+            result_file(project_root, args.bfcl_model_name, category)
+        )
+        spec_metrics = compute_spec_metrics(spec_before, spec_after, total_completion_tokens)
+        summary_rows.append(
+            collect_category_summary(project_root, args.bfcl_model_name, category, spec_metrics)
+        )
+    write_summary(summary_path, summary_rows)
+    print_markdown_summary(summary_rows)
 
 
 if __name__ == "__main__":
